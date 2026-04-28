@@ -10,11 +10,13 @@ import sys
 from dataclasses import dataclass
 from html import unescape
 from html.parser import HTMLParser
-from urllib.parse import quote_plus, urljoin, urlparse
+from urllib.parse import parse_qs, quote_plus, unquote, urljoin, urlparse
 
 DEFAULT_TIMEOUT = 5.0
 USER_AGENT = "go2web/0.1"
 MAX_REDIRECTS = 5
+SEARCH_ENGINE_HOST = "search.opera.com"
+SEARCH_RESULTS_LIMIT = 10
 
 
 @dataclass
@@ -25,6 +27,12 @@ class ParsedHttpResponse:
     content_type: str
     location: str
     body: bytes
+
+
+@dataclass
+class SearchResult:
+    title: str
+    link: str
 
 
 class TitleParser(HTMLParser):
@@ -96,6 +104,70 @@ class VisibleTextParser(HTMLParser):
         lines = [line.strip() for line in merged.splitlines()]
         lines = [line for line in lines if line]
         return "\n".join(lines)
+
+
+class SearchResultsParser(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__()
+        self._in_result_link = False
+        self._current_href = ""
+        self._current_title_parts: list[str] = []
+        self.results: list[SearchResult] = []
+        self._seen: set[tuple[str, str]] = set()
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag.lower() != "a":
+            return
+        attr_map = {k.lower(): (v or "") for k, v in attrs}
+        href = attr_map.get("href", "").strip()
+        if not href:
+            return
+
+        # Prefer known search-result anchors when present, but also allow
+        # generic links (Opera pages do not always use DuckDuckGo classes).
+        css_classes = set(attr_map.get("class", "").split())
+        looks_like_result = "result__a" in css_classes or "result" in css_classes
+        if not looks_like_result and href.startswith("#"):
+            return
+
+        self._in_result_link = True
+        self._current_href = href
+        self._current_title_parts = []
+
+    def handle_data(self, data: str) -> None:
+        if self._in_result_link:
+            self._current_title_parts.append(data)
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag.lower() != "a" or not self._in_result_link:
+            return
+        raw_title = " ".join(part.strip() for part in self._current_title_parts if part.strip()).strip()
+        title = unescape(raw_title)
+        link = normalize_search_result_link(self._current_href)
+        if title and link:
+            key = (title, link)
+            if key not in self._seen:
+                self.results.append(SearchResult(title=title, link=link))
+                self._seen.add(key)
+        self._in_result_link = False
+        self._current_href = ""
+        self._current_title_parts = []
+
+
+def normalize_search_result_link(link: str) -> str:
+    parsed = urlparse(link)
+    if parsed.scheme in {"http", "https"}:
+        return link
+    if link.startswith("//"):
+        return f"https:{link}"
+    if parsed.path.startswith("/l/"):
+        params = parse_qs(parsed.query)
+        target = params.get("uddg", [""])[0]
+        if target:
+            return unquote(target)
+    if parsed.path and parsed.path.startswith("/"):
+        return urljoin(f"https://{SEARCH_ENGINE_HOST}", parsed.path)
+    return link
 
 
 def decode_body_text(body: bytes, content_type: str) -> str:
@@ -227,6 +299,24 @@ def fetch_http_via_socket(
     return response
 
 
+def fetch_url_follow_redirects(url: str, timeout: float) -> tuple[str, ParsedHttpResponse]:
+    current_url = url
+    redirect_count = 0
+
+    while True:
+        scheme, host, port, path = parse_web_url(current_url)
+        response = fetch_http_via_socket(
+            host=host, port=port, path=path, timeout=timeout, use_tls=(scheme == "https")
+        )
+        if response.status_code in {301, 302} and response.location:
+            if redirect_count >= MAX_REDIRECTS:
+                raise ValueError(f"too many redirects (limit: {MAX_REDIRECTS})")
+            current_url = urljoin(current_url, response.location)
+            redirect_count += 1
+            continue
+        return current_url, response
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="go2web",
@@ -325,13 +415,39 @@ def handle_url(url: str, timeout: float) -> int:
     return 0
 
 
-def handle_search(search_term: str) -> int:
+def handle_search(search_term: str, timeout: float) -> int:
     if not search_term:
         print("Error: missing search term after -s", file=sys.stderr)
         return 2
+
     query = quote_plus(search_term)
-    search_url = f"https://duckduckgo.com/?q={query}"
+    search_url = f"http://{SEARCH_ENGINE_HOST}/html/?q={query}"
     print(f"Search URL: {search_url}")
+
+    try:
+        final_url, response = fetch_url_follow_redirects(search_url, timeout)
+    except (OSError, ValueError, ssl.SSLError) as exc:
+        print(f"Network error: {exc}", file=sys.stderr)
+        return 1
+
+    if response.status_code < 200 or response.status_code >= 300:
+        print(f"Search failed with status {response.status_code}: {response.status_line}", file=sys.stderr)
+        return 1
+
+    html = decode_body_text(response.body, response.content_type)
+    parser = SearchResultsParser()
+    parser.feed(html)
+
+    if final_url != search_url:
+        print(f"Final URL: {final_url}")
+    if not parser.results:
+        print("No search results found.")
+        return 0
+
+    print(f"Top {min(SEARCH_RESULTS_LIMIT, len(parser.results))} results:")
+    for idx, item in enumerate(parser.results[:SEARCH_RESULTS_LIMIT], start=1):
+        print(f"{idx}. {item.title}")
+        print(f"   {item.link}")
     return 0
 
 
@@ -351,7 +467,7 @@ def main(argv: list[str]) -> int:
         return handle_url(args.url, args.timeout)
 
     if args.search_term is not None:
-        return handle_search(args.search_term)
+        return handle_search(args.search_term, args.timeout)
 
     print("Error: choose one command: -u <URL> or -s <search-term>", file=sys.stderr)
     return 2
