@@ -44,6 +44,18 @@ Extracted fields:
   - extracts visible text
 - if `Content-Type` is JSON:
   - pretty-prints JSON
+
+## Task 9 HTTP cache
+
+- cache key: request URL
+- cache value: final response (status, headers, body, final URL)
+- storage: file-based (`.go2web_cache.json`)
+- expiration: 5 minutes
+- cache checked before network request for both `-u` and `-s`
+
+## Search engine
+
+- `-s` now uses DuckDuckGo (`https://duckduckgo.com/html/?q=...`)
 ## Task 1 CLI interface
 
 Supported commands:
