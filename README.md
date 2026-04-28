@@ -4,9 +4,11 @@ Python CLI for the web programming tasks.
 
 ## Task 3 TCP Socket layer
 
-`-u <URL>` now uses raw TCP sockets (no HTTP libraries):
+`-u <URL>` now uses raw sockets (no HTTP libraries):
 
+- supports both `http://` and `https://`
 - opens TCP socket to `host:port`
+- wraps socket with TLS for `https://`
 - sends manual HTTP/1.1 request:
   - `GET /path HTTP/1.1`
   - `Host: ...`
