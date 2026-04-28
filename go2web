@@ -5,7 +5,7 @@ import argparse
 import sys
 from html.parser import HTMLParser
 from urllib.error import HTTPError, URLError
-from urllib.parse import quote_plus
+from urllib.parse import quote_plus, urlparse
 from urllib.request import Request, urlopen
 
 DEFAULT_TIMEOUT = 5.0
@@ -68,10 +68,32 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
+def parse_http_url(url: str) -> tuple[str, int, str]:
+    parsed = urlparse(url)
+    if parsed.scheme.lower() != "http":
+        raise ValueError("Only http:// URLs are supported for now")
+    if not parsed.hostname:
+        raise ValueError("Invalid URL: missing host")
+
+    host = parsed.hostname
+    port = parsed.port or 80
+    path = parsed.path if parsed.path else "/index.html"
+    return host, port, path
+
+
 def handle_url(url: str, timeout: float) -> int:
     if not url:
         print("Error: missing URL after -u", file=sys.stderr)
         return 2
+    try:
+        host, port, path = parse_http_url(url)
+    except ValueError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 2
+
+    print(f"Host: {host}")
+    print(f"Port: {port}")
+    print(f"Path: {path}")
 
     try:
         html = fetch_html(url, timeout)
