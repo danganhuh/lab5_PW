@@ -16,6 +16,35 @@ Python CLI for the web programming tasks.
 - receives full response with looped `recv(4096)` until socket closes
 - parses headers/body and decodes chunked transfer encoding when present
 
+## Task 4 HTTP response parser
+
+Raw response is split into:
+
+- status line
+- headers
+- body
+
+Extracted fields:
+
+- status code
+- content-type
+- location (redirect header)
+
+## Task 5 redirect handling
+
+- detects `301` and `302`
+- extracts `Location` header
+- automatically follows redirects
+- limit: 5 redirects (loop protection)
+
+## Task 6 content processing
+
+- if `Content-Type` is `text/html`:
+  - strips HTML tags
+  - extracts visible text
+- if `Content-Type` is JSON:
+  - pretty-prints JSON
+
 ## Task 1 CLI interface
 
 Supported commands:
