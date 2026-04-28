@@ -56,6 +56,31 @@ Extracted fields:
 ## Search engine
 
 - `-s` now uses DuckDuckGo (`https://duckduckgo.com/html/?q=...`)
+- search results are normalized to direct target links (no DuckDuckGo redirect wrapper)
+
+## Task 10 content negotiation
+
+- request header includes:
+  - `Accept: text/html, application/json`
+- response handling:
+  - HTML (`text/html`) -> strips tags and prints readable text
+  - JSON (`application/json`) -> pretty-prints JSON
+
+## Task 11 output formatting
+
+- trims and normalizes whitespace
+- limits long lines for readability
+- keeps result links fully copyable
+
+## Task 12 error handling
+
+- user-friendly errors for:
+  - invalid URL
+  - DNS lookup failure
+  - connection refused
+  - timeout
+  - TLS/SSL handshake problems
+
 ## Task 1 CLI interface
 
 Supported commands:

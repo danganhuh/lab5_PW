@@ -9,10 +9,12 @@ import socket
 import ssl
 import sys
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from html import unescape
 from html.parser import HTMLParser
 from pathlib import Path
+from textwrap import shorten
 from urllib.parse import parse_qs, quote_plus, unquote, urljoin, urlparse
 
 DEFAULT_TIMEOUT = 5.0
@@ -22,6 +24,8 @@ SEARCH_ENGINE_HOST = "duckduckgo.com"
 SEARCH_RESULTS_LIMIT = 10
 CACHE_TTL_SECONDS = 300
 CACHE_FILE = Path(__file__).with_name(".go2web_cache.json")
+ACCEPT_HEADER = "text/html, application/json"
+MAX_OUTPUT_LINE_LENGTH = 120
 
 
 @dataclass
@@ -192,11 +196,10 @@ def normalize_search_result_link(link: str) -> str:
     parsed = urlparse(link)
     if link.startswith("//"):
         return f"https:{link}"
-    if parsed.path.startswith("/l/"):
-        params = parse_qs(parsed.query)
-        target = params.get("uddg", [""])[0]
-        if target:
-            return unquote(target)
+    params = parse_qs(parsed.query)
+    target = params.get("uddg", [""])[0]
+    if target:
+        return unquote(target)
     if parsed.scheme in {"http", "https"}:
         return link
     if parsed.path and parsed.path.startswith("/"):
@@ -311,6 +314,33 @@ def decode_body_text(body: bytes, content_type: str) -> str:
     return body.decode(charset, errors="replace")
 
 
+def clean_and_limit_text(text: str, max_len: int = MAX_OUTPUT_LINE_LENGTH) -> str:
+    cleaned_lines: list[str] = []
+    for raw_line in text.splitlines():
+        line = re.sub(r"\s+", " ", raw_line).strip()
+        if not line:
+            continue
+        if len(line) > max_len:
+            line = shorten(line, width=max_len, placeholder=" ...")
+        cleaned_lines.append(line)
+    return "\n".join(cleaned_lines)
+
+
+def limit_long_lines_preserve_structure(text: str, max_len: int = MAX_OUTPUT_LINE_LENGTH) -> str:
+    lines: list[str] = []
+    for raw_line in text.splitlines():
+        if len(raw_line) <= max_len:
+            lines.append(raw_line.rstrip())
+            continue
+        lines.append(shorten(raw_line, width=max_len, placeholder=" ..."))
+    return "\n".join(lines).rstrip()
+
+
+def to_console_safe(text: str) -> str:
+    encoding = sys.stdout.encoding or "utf-8"
+    return text.encode(encoding, errors="replace").decode(encoding, errors="replace")
+
+
 def format_response_content(body: bytes, content_type: str) -> str:
     lowered = content_type.lower()
     text = decode_body_text(body, content_type)
@@ -318,16 +348,43 @@ def format_response_content(body: bytes, content_type: str) -> str:
     if "application/json" in lowered or lowered.endswith("+json"):
         try:
             parsed = json.loads(text)
-            return json.dumps(parsed, indent=2, ensure_ascii=False)
+            pretty = json.dumps(parsed, indent=2, ensure_ascii=False)
+            return limit_long_lines_preserve_structure(pretty)
         except json.JSONDecodeError:
-            return text
+            return clean_and_limit_text(text)
 
     if "text/html" in lowered:
         parser = VisibleTextParser()
         parser.feed(text)
-        return unescape(parser.get_text())
+        return clean_and_limit_text(unescape(parser.get_text()))
 
-    return text
+    return clean_and_limit_text(text)
+
+
+def format_network_error(exc: Exception) -> tuple[str, int]:
+    if isinstance(exc, socket.gaierror):
+        return "DNS lookup failed. Check the host name and your internet connection.", 1
+    if isinstance(exc, ConnectionRefusedError):
+        return "Connection refused by the remote host.", 1
+    if isinstance(exc, (TimeoutError, socket.timeout)):
+        return "Connection timed out. The server did not respond in time.", 1
+    if isinstance(exc, ssl.SSLError):
+        return "TLS/SSL handshake failed for HTTPS connection.", 1
+    if isinstance(exc, ValueError):
+        message = str(exc)
+        if "too many redirects" in message.lower():
+            return f"Redirect error: {message}.", 1
+        return f"Invalid URL or response format: {message}", 2
+    return f"Network error: {exc}", 1
+
+
+def run_with_user_friendly_network_errors(action: Callable[[], int]) -> int:
+    try:
+        return action()
+    except (OSError, ssl.SSLError, ValueError) as exc:
+        message, code = format_network_error(exc)
+        print(f"Error: {message}", file=sys.stderr)
+        return code
 
 
 def recv_all(sock: socket.socket) -> bytes:
@@ -409,6 +466,7 @@ def fetch_http_via_socket(
         f"GET {path} HTTP/1.1\r\n"
         f"Host: {host_header}\r\n"
         f"User-Agent: {USER_AGENT}\r\n"
+        f"Accept: {ACCEPT_HEADER}\r\n"
         "Connection: close\r\n"
         "\r\n"
     ).encode("ascii", errors="replace")
@@ -500,34 +558,31 @@ def handle_url(url: str, timeout: float) -> int:
     if not url:
         print("Error: missing URL after -u", file=sys.stderr)
         return 2
-    try:
+    def _run() -> int:
         final_url, response, cache_hit = fetch_url_follow_redirects(url, timeout)
         scheme, host, port, path = parse_web_url(final_url)
-    except ValueError as exc:
-        print(f"Error: {exc}", file=sys.stderr)
-        return 2
-    except (OSError, ssl.SSLError) as exc:
-        print(f"Network error: {exc}", file=sys.stderr)
-        return 1
 
-    print(f"Final URL: {final_url}")
-    print(f"Cache: {'HIT' if cache_hit else 'MISS'}")
-    print(f"Scheme: {scheme}")
-    print(f"Host: {host}")
-    print(f"Port: {port}")
-    print(f"Path: {path}")
+        print(f"Final URL: {final_url}")
+        print(f"Cache: {'HIT' if cache_hit else 'MISS'}")
+        print(f"Scheme: {scheme}")
+        print(f"Host: {host}")
+        print(f"Port: {port}")
+        print(f"Path: {path}")
 
-    print(f"Status: {response.status_line}")
-    print(f"Status code: {response.status_code}")
-    print(f"Content-Type: {response.content_type or '(not set)'}")
-    print(f"Location: {response.location or '(not set)'}")
-    body_text = decode_body_text(response.body, response.content_type)
-    parser = TitleParser()
-    parser.feed(body_text)
-    print(f"Title: {parser.title or '(no title found)'}")
-    print("Content:")
-    print(format_response_content(response.body, response.content_type) or "(empty body)")
-    return 0
+        print(f"Status: {response.status_line}")
+        print(f"Status code: {response.status_code}")
+        print(f"Content-Type: {response.content_type or '(not set)'}")
+        print(f"Location: {response.location or '(not set)'}")
+        body_text = decode_body_text(response.body, response.content_type)
+        parser = TitleParser()
+        parser.feed(body_text)
+        print(f"Title: {parser.title or '(no title found)'}")
+        print("Content:")
+        content = format_response_content(response.body, response.content_type) or "(empty body)"
+        print(to_console_safe(content))
+        return 0
+
+    return run_with_user_friendly_network_errors(_run)
 
 
 def handle_search(search_term: str, timeout: float) -> int:
@@ -539,31 +594,33 @@ def handle_search(search_term: str, timeout: float) -> int:
     search_url = f"https://{SEARCH_ENGINE_HOST}/html/?q={query}"
     print(f"Search URL: {search_url}")
 
-    try:
+    def _run() -> int:
         final_url, response, cache_hit = fetch_url_follow_redirects(search_url, timeout)
-    except (OSError, ValueError, ssl.SSLError) as exc:
-        print(f"Network error: {exc}", file=sys.stderr)
-        return 1
 
-    if response.status_code < 200 or response.status_code >= 300:
-        print(f"Search failed with status {response.status_code}: {response.status_line}", file=sys.stderr)
-        return 1
+        if response.status_code < 200 or response.status_code >= 300:
+            print(f"Search failed with status {response.status_code}: {response.status_line}", file=sys.stderr)
+            return 1
 
-    html = decode_body_text(response.body, response.content_type)
-    parser = SearchResultsParser()
-    parser.feed(html)
+        html = decode_body_text(response.body, response.content_type)
+        parser = SearchResultsParser()
+        parser.feed(html)
 
-    if final_url != search_url:
-        print(f"Final URL: {final_url}")
-    print(f"Cache: {'HIT' if cache_hit else 'MISS'}")
-    if not parser.results:
-        print("No search results found.")
+        if final_url != search_url:
+            print(f"Final URL: {final_url}")
+        print(f"Cache: {'HIT' if cache_hit else 'MISS'}")
+        if not parser.results:
+            print("No search results found.")
+            return 0
+
+        print(f"Top {min(SEARCH_RESULTS_LIMIT, len(parser.results))} results:")
+        for idx, item in enumerate(parser.results[:SEARCH_RESULTS_LIMIT], start=1):
+            title = clean_and_limit_text(item.title, max_len=90) or "(untitled)"
+            direct_link = normalize_search_result_link(item.link)
+            link = clean_and_limit_text(direct_link, max_len=10000) or "(no link)"
+            print(to_console_safe(f"[{idx}] {title} - {link}"))
         return 0
 
-    print(f"Top {min(SEARCH_RESULTS_LIMIT, len(parser.results))} results:")
-    for idx, item in enumerate(parser.results[:SEARCH_RESULTS_LIMIT], start=1):
-        print(f"[{idx}] {item.title} - {item.link}")
-    return 0
+    return run_with_user_friendly_network_errors(_run)
 
 
 def main(argv: list[str]) -> int:
