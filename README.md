@@ -37,6 +37,14 @@ Extracted fields:
 - automatically follows redirects
 - limit: 5 redirects (loop protection)
 
+## Task 6 content processing
+
+- if `Content-Type` is `text/html`:
+  - strips HTML tags
+  - extracts visible text
+- if `Content-Type` is JSON:
+  - pretty-prints JSON
+
 ## Task 1 CLI interface
 
 Supported commands:
