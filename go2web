@@ -2,11 +2,11 @@
 from __future__ import annotations
 
 import argparse
+import socket
+import ssl
 import sys
 from html.parser import HTMLParser
-from urllib.error import HTTPError, URLError
 from urllib.parse import quote_plus, urlparse
-from urllib.request import Request, urlopen
 
 DEFAULT_TIMEOUT = 5.0
 USER_AGENT = "go2web/0.1"
@@ -35,12 +35,92 @@ class TitleParser(HTMLParser):
         return " ".join(p.strip() for p in self._parts if p.strip()).strip()
 
 
-def fetch_html(url: str, timeout: float) -> str:
-    req = Request(url, headers={"User-Agent": USER_AGENT})
-    with urlopen(req, timeout=timeout) as response:
-        data = response.read()
-        charset = response.headers.get_content_charset() or "utf-8"
-        return data.decode(charset, errors="replace")
+def recv_all(sock: socket.socket) -> bytes:
+    chunks: list[bytes] = []
+    while True:
+        chunk = sock.recv(4096)
+        if not chunk:
+            break
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
+def parse_http_response(raw_response: bytes) -> tuple[str, dict[str, str], bytes]:
+    header_end = raw_response.find(b"\r\n\r\n")
+    if header_end == -1:
+        raise ValueError("Invalid HTTP response: missing header separator")
+
+    header_blob = raw_response[:header_end].decode("iso-8859-1", errors="replace")
+    body = raw_response[header_end + 4 :]
+    header_lines = header_blob.split("\r\n")
+    status_line = header_lines[0] if header_lines else "HTTP/1.1 000 Unknown"
+
+    headers: dict[str, str] = {}
+    for line in header_lines[1:]:
+        if ":" not in line:
+            continue
+        key, value = line.split(":", 1)
+        headers[key.strip().lower()] = value.strip()
+    return status_line, headers, body
+
+
+def decode_chunked_body(chunked: bytes) -> bytes:
+    data = chunked
+    decoded = bytearray()
+    idx = 0
+
+    while True:
+        line_end = data.find(b"\r\n", idx)
+        if line_end == -1:
+            raise ValueError("Invalid chunked response: missing chunk size line")
+        size_line = data[idx:line_end].decode("ascii", errors="replace").strip()
+        size_token = size_line.split(";", 1)[0].strip()
+        try:
+            chunk_size = int(size_token, 16)
+        except ValueError as exc:
+            raise ValueError("Invalid chunked response: bad chunk size") from exc
+
+        idx = line_end + 2
+        if chunk_size == 0:
+            break
+
+        chunk_end = idx + chunk_size
+        if chunk_end > len(data):
+            raise ValueError("Invalid chunked response: incomplete chunk")
+        decoded.extend(data[idx:chunk_end])
+        idx = chunk_end + 2  # Skip trailing CRLF after chunk data.
+
+    return bytes(decoded)
+
+
+def fetch_http_via_socket(
+    host: str, port: int, path: str, timeout: float, use_tls: bool
+) -> tuple[str, bytes]:
+    default_port = 443 if use_tls else 80
+    host_header = host if port == default_port else f"{host}:{port}"
+    request = (
+        f"GET {path} HTTP/1.1\r\n"
+        f"Host: {host_header}\r\n"
+        f"User-Agent: {USER_AGENT}\r\n"
+        "Connection: close\r\n"
+        "\r\n"
+    ).encode("ascii", errors="replace")
+
+    with socket.create_connection((host, port), timeout=timeout) as sock:
+        if use_tls:
+            context = ssl.create_default_context()
+            with context.wrap_socket(sock, server_hostname=host) as tls_sock:
+                tls_sock.sendall(request)
+                raw_response = recv_all(tls_sock)
+        else:
+            sock.sendall(request)
+            raw_response = recv_all(sock)
+
+    status_line, headers, body = parse_http_response(raw_response)
+    transfer_encoding = headers.get("transfer-encoding", "").lower()
+    if "chunked" in transfer_encoding:
+        body = decode_chunked_body(body)
+    return status_line, body
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -68,17 +148,21 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-def parse_http_url(url: str) -> tuple[str, int, str]:
+def parse_web_url(url: str) -> tuple[str, str, int, str]:
     parsed = urlparse(url)
-    if parsed.scheme.lower() != "http":
-        raise ValueError("Only http:// URLs are supported for now")
+    scheme = parsed.scheme.lower()
+    if scheme not in {"http", "https"}:
+        raise ValueError("Only http:// and https:// URLs are supported")
     if not parsed.hostname:
         raise ValueError("Invalid URL: missing host")
 
     host = parsed.hostname
-    port = parsed.port or 80
+    default_port = 443 if scheme == "https" else 80
+    port = parsed.port or default_port
     path = parsed.path if parsed.path else "/index.html"
-    return host, port, path
+    if parsed.query:
+        path = f"{path}?{parsed.query}"
+    return scheme, host, port, path
 
 
 def handle_url(url: str, timeout: float) -> int:
@@ -86,27 +170,26 @@ def handle_url(url: str, timeout: float) -> int:
         print("Error: missing URL after -u", file=sys.stderr)
         return 2
     try:
-        host, port, path = parse_http_url(url)
+        scheme, host, port, path = parse_web_url(url)
     except ValueError as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 2
 
+    print(f"Scheme: {scheme}")
     print(f"Host: {host}")
     print(f"Port: {port}")
     print(f"Path: {path}")
 
     try:
-        html = fetch_html(url, timeout)
-    except HTTPError as exc:
-        print(f"HTTP error: {exc.code} {exc.reason}", file=sys.stderr)
-        return 1
-    except URLError as exc:
-        print(f"URL error: {exc.reason}", file=sys.stderr)
-        return 1
-    except OSError as exc:
+        status_line, body = fetch_http_via_socket(
+            host=host, port=port, path=path, timeout=timeout, use_tls=(scheme == "https")
+        )
+    except (OSError, ValueError, ssl.SSLError) as exc:
         print(f"Network error: {exc}", file=sys.stderr)
         return 1
 
+    print(f"Status: {status_line}")
+    html = body.decode("utf-8", errors="replace")
     parser = TitleParser()
     parser.feed(html)
     print(f"Title: {parser.title or '(no title found)'}")
