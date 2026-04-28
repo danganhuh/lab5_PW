@@ -1,23 +1,28 @@
 # go2web
 
-Python CLI base for Task 0.
+Python CLI for the web programming tasks.
 
-## Includes required capabilities
+## Task 1 CLI interface
 
-- TCP sockets (`--tcp-check HOST:PORT`)
-- CLI argument parsing (`argparse`)
-- HTML parsing (`html.parser` title extraction)
+Supported commands:
 
-## Run
+- `go2web -h` show help
+- `go2web -u <URL>` call URL/HTTP handler
+- `go2web -s <search-term>` call search handler
 
-```sh
-python go2web --help
-python go2web https://example.com
-python go2web --tcp-check example.com:80
-```
+Validation:
 
-On Unix-like systems, it can also run as:
+- Missing value after `-u` -> error
+- Missing value after `-s` -> error
+- Using `-u` and `-s` together -> error
 
-```sh
-./go2web --help
+## Run on Windows
+
+- `python go2web -h`
+- `go2web -h` (via `go2web.cmd` in this folder)
+
+To run `go2web` from any folder, add this directory to your PATH:
+
+```powershell
+setx PATH "$env:PATH;C:\Users\user\Desktop\University\WP\lab5"
 ```
