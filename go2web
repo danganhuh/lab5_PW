@@ -2,10 +2,10 @@
 from __future__ import annotations
 
 import argparse
-import socket
 import sys
 from html.parser import HTMLParser
 from urllib.error import HTTPError, URLError
+from urllib.parse import quote_plus, urlparse
 from urllib.request import Request, urlopen
 
 DEFAULT_TIMEOUT = 5.0
@@ -35,14 +35,6 @@ class TitleParser(HTMLParser):
         return " ".join(p.strip() for p in self._parts if p.strip()).strip()
 
 
-def check_tcp(host: str, port: int, timeout: float) -> bool:
-    try:
-        with socket.create_connection((host, port), timeout=timeout):
-            return True
-    except OSError:
-        return False
-
-
 def fetch_html(url: str, timeout: float) -> str:
     req = Request(url, headers={"User-Agent": USER_AGENT})
     with urlopen(req, timeout=timeout) as response:
@@ -51,37 +43,60 @@ def fetch_html(url: str, timeout: float) -> str:
         return data.decode(charset, errors="replace")
 
 
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="go2web",
+        add_help=False,
+        formatter_class=argparse.RawTextHelpFormatter,
+        description=(
+            "go2web - CLI web helper\n\n"
+            "Usage:\n"
+            "  go2web -h\n"
+            "  go2web -u <URL>\n"
+            "  go2web -s <search-term>"
+        ),
+    )
+    parser.add_argument("-h", "--help", action="store_true", help="Show this help message and exit")
+    parser.add_argument("-u", metavar="URL", dest="url", help="Fetch URL and print page title")
+    parser.add_argument("-s", metavar="TERM", dest="search_term", help="Search term handler")
+    parser.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT, help="HTTP timeout in seconds")
+    return parser
+
+
 def parse_args(argv: list[str]) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(prog="go2web", description="Simple CLI web helper.")
-    parser.add_argument("url", nargs="?", help="URL to fetch (example: https://example.com)")
-    parser.add_argument("--tcp-check", metavar="HOST:PORT", help="Check TCP connectivity")
-    parser.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT, help="Timeout in seconds")
+    parser = build_parser()
     return parser.parse_args(argv)
 
 
-def main(argv: list[str]) -> int:
-    args = parse_args(argv)
+def parse_http_url(url: str) -> tuple[str, int, str]:
+    parsed = urlparse(url)
+    if parsed.scheme.lower() != "http":
+        raise ValueError("Only http:// URLs are supported for now")
+    if not parsed.hostname:
+        raise ValueError("Invalid URL: missing host")
 
-    if args.tcp_check:
-        if ":" not in args.tcp_check:
-            print("Error: --tcp-check must be HOST:PORT", file=sys.stderr)
-            return 2
-        host, port_s = args.tcp_check.rsplit(":", 1)
-        try:
-            port = int(port_s)
-        except ValueError:
-            print("Error: PORT must be an integer", file=sys.stderr)
-            return 2
-        ok = check_tcp(host, port, args.timeout)
-        print(f"TCP {'OK' if ok else 'FAILED'}: {host}:{port}")
-        return 0 if ok else 1
+    host = parsed.hostname
+    port = parsed.port or 80
+    path = parsed.path if parsed.path else "/index.html"
+    return host, port, path
 
-    if not args.url:
-        print("Use --help to see options.")
-        return 0
+
+def handle_url(url: str, timeout: float) -> int:
+    if not url:
+        print("Error: missing URL after -u", file=sys.stderr)
+        return 2
+    try:
+        host, port, path = parse_http_url(url)
+    except ValueError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 2
+
+    print(f"Host: {host}")
+    print(f"Port: {port}")
+    print(f"Path: {path}")
 
     try:
-        html = fetch_html(args.url, args.timeout)
+        html = fetch_html(url, timeout)
     except HTTPError as exc:
         print(f"HTTP error: {exc.code} {exc.reason}", file=sys.stderr)
         return 1
@@ -96,6 +111,38 @@ def main(argv: list[str]) -> int:
     parser.feed(html)
     print(f"Title: {parser.title or '(no title found)'}")
     return 0
+
+
+def handle_search(search_term: str) -> int:
+    if not search_term:
+        print("Error: missing search term after -s", file=sys.stderr)
+        return 2
+    query = quote_plus(search_term)
+    search_url = f"https://duckduckgo.com/?q={query}"
+    print(f"Search URL: {search_url}")
+    return 0
+
+
+def main(argv: list[str]) -> int:
+    parser = build_parser()
+    args = parse_args(argv)
+
+    if args.help or not argv:
+        print(parser.format_help())
+        return 0
+
+    if args.url and args.search_term:
+        print("Error: use either -u or -s, not both", file=sys.stderr)
+        return 2
+
+    if args.url is not None:
+        return handle_url(args.url, args.timeout)
+
+    if args.search_term is not None:
+        return handle_search(args.search_term)
+
+    print("Error: choose one command: -u <URL> or -s <search-term>", file=sys.stderr)
+    return 2
 
 
 if __name__ == "__main__":
