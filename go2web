@@ -2,15 +2,19 @@
 from __future__ import annotations
 
 import argparse
+import json
+import re
 import socket
 import ssl
 import sys
 from dataclasses import dataclass
+from html import unescape
 from html.parser import HTMLParser
-from urllib.parse import quote_plus, urlparse
+from urllib.parse import quote_plus, urljoin, urlparse
 
 DEFAULT_TIMEOUT = 5.0
 USER_AGENT = "go2web/0.1"
+MAX_REDIRECTS = 5
 
 
 @dataclass
@@ -44,6 +48,83 @@ class TitleParser(HTMLParser):
     @property
     def title(self) -> str:
         return " ".join(p.strip() for p in self._parts if p.strip()).strip()
+
+
+class VisibleTextParser(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__()
+        self._ignore_depth = 0
+        self._parts: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag.lower() in {"script", "style"}:
+            self._ignore_depth += 1
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag.lower() in {"script", "style"} and self._ignore_depth > 0:
+            self._ignore_depth -= 1
+        if tag.lower() in {
+            "p",
+            "br",
+            "div",
+            "li",
+            "section",
+            "article",
+            "h1",
+            "h2",
+            "h3",
+            "h4",
+            "h5",
+            "h6",
+            "ul",
+            "ol",
+        }:
+            self._parts.append("\n")
+
+    def handle_data(self, data: str) -> None:
+        if self._ignore_depth == 0:
+            text = re.sub(r"\s+", " ", data).strip()
+            if text:
+                if self._parts and not self._parts[-1].endswith("\n"):
+                    self._parts.append(" ")
+                self._parts.append(text)
+
+    def get_text(self) -> str:
+        merged = "".join(self._parts)
+        merged = re.sub(r"[ \t]+", " ", merged)
+        merged = re.sub(r"\n{3,}", "\n\n", merged)
+        lines = [line.strip() for line in merged.splitlines()]
+        lines = [line for line in lines if line]
+        return "\n".join(lines)
+
+
+def decode_body_text(body: bytes, content_type: str) -> str:
+    charset = "utf-8"
+    for part in content_type.split(";")[1:]:
+        name, sep, value = part.strip().partition("=")
+        if sep and name.lower() == "charset" and value:
+            charset = value.strip().strip('"').strip("'")
+            break
+    return body.decode(charset, errors="replace")
+
+
+def format_response_content(body: bytes, content_type: str) -> str:
+    lowered = content_type.lower()
+    text = decode_body_text(body, content_type)
+
+    if "application/json" in lowered or lowered.endswith("+json"):
+        try:
+            parsed = json.loads(text)
+            return json.dumps(parsed, indent=2, ensure_ascii=False)
+        except json.JSONDecodeError:
+            return text
+
+    if "text/html" in lowered:
+        parser = VisibleTextParser()
+        parser.feed(text)
+        return unescape(parser.get_text())
+
+    return text
 
 
 def recv_all(sock: socket.socket) -> bytes:
@@ -192,33 +273,55 @@ def handle_url(url: str, timeout: float) -> int:
     if not url:
         print("Error: missing URL after -u", file=sys.stderr)
         return 2
-    try:
-        scheme, host, port, path = parse_web_url(url)
-    except ValueError as exc:
-        print(f"Error: {exc}", file=sys.stderr)
-        return 2
+    current_url = url
+    redirect_count = 0
+    response: ParsedHttpResponse | None = None
 
-    print(f"Scheme: {scheme}")
-    print(f"Host: {host}")
-    print(f"Port: {port}")
-    print(f"Path: {path}")
+    while True:
+        try:
+            scheme, host, port, path = parse_web_url(current_url)
+        except ValueError as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            return 2
 
-    try:
-        response = fetch_http_via_socket(
-            host=host, port=port, path=path, timeout=timeout, use_tls=(scheme == "https")
-        )
-    except (OSError, ValueError, ssl.SSLError) as exc:
-        print(f"Network error: {exc}", file=sys.stderr)
+        print(f"Scheme: {scheme}")
+        print(f"Host: {host}")
+        print(f"Port: {port}")
+        print(f"Path: {path}")
+
+        try:
+            response = fetch_http_via_socket(
+                host=host, port=port, path=path, timeout=timeout, use_tls=(scheme == "https")
+            )
+        except (OSError, ValueError, ssl.SSLError) as exc:
+            print(f"Network error: {exc}", file=sys.stderr)
+            return 1
+
+        if response.status_code in {301, 302} and response.location:
+            if redirect_count >= MAX_REDIRECTS:
+                print(f"Error: too many redirects (limit: {MAX_REDIRECTS})", file=sys.stderr)
+                return 1
+            next_url = urljoin(current_url, response.location)
+            print(f"Redirect ({response.status_code}) -> {next_url}")
+            current_url = next_url
+            redirect_count += 1
+            continue
+        break
+
+    if response is None:
+        print("Network error: empty response", file=sys.stderr)
         return 1
 
     print(f"Status: {response.status_line}")
     print(f"Status code: {response.status_code}")
     print(f"Content-Type: {response.content_type or '(not set)'}")
     print(f"Location: {response.location or '(not set)'}")
-    html = response.body.decode("utf-8", errors="replace")
+    body_text = decode_body_text(response.body, response.content_type)
     parser = TitleParser()
-    parser.feed(html)
+    parser.feed(body_text)
     print(f"Title: {parser.title or '(no title found)'}")
+    print("Content:")
+    print(format_response_content(response.body, response.content_type) or "(empty body)")
     return 0
 
 
