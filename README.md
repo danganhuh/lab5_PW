@@ -2,6 +2,18 @@
 
 Python CLI for the web programming tasks.
 
+## Task 3 TCP Socket layer
+
+`-u <URL>` now uses raw TCP sockets (no HTTP libraries):
+
+- opens TCP socket to `host:port`
+- sends manual HTTP/1.1 request:
+  - `GET /path HTTP/1.1`
+  - `Host: ...`
+  - `Connection: close`
+- receives full response with looped `recv(4096)` until socket closes
+- parses headers/body and decodes chunked transfer encoding when present
+
 ## Task 1 CLI interface
 
 Supported commands:

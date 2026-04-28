@@ -2,11 +2,10 @@
 from __future__ import annotations
 
 import argparse
+import socket
 import sys
 from html.parser import HTMLParser
-from urllib.error import HTTPError, URLError
 from urllib.parse import quote_plus, urlparse
-from urllib.request import Request, urlopen
 
 DEFAULT_TIMEOUT = 5.0
 USER_AGENT = "go2web/0.1"
@@ -35,12 +34,82 @@ class TitleParser(HTMLParser):
         return " ".join(p.strip() for p in self._parts if p.strip()).strip()
 
 
-def fetch_html(url: str, timeout: float) -> str:
-    req = Request(url, headers={"User-Agent": USER_AGENT})
-    with urlopen(req, timeout=timeout) as response:
-        data = response.read()
-        charset = response.headers.get_content_charset() or "utf-8"
-        return data.decode(charset, errors="replace")
+def recv_all(sock: socket.socket) -> bytes:
+    chunks: list[bytes] = []
+    while True:
+        chunk = sock.recv(4096)
+        if not chunk:
+            break
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
+def parse_http_response(raw_response: bytes) -> tuple[str, dict[str, str], bytes]:
+    header_end = raw_response.find(b"\r\n\r\n")
+    if header_end == -1:
+        raise ValueError("Invalid HTTP response: missing header separator")
+
+    header_blob = raw_response[:header_end].decode("iso-8859-1", errors="replace")
+    body = raw_response[header_end + 4 :]
+    header_lines = header_blob.split("\r\n")
+    status_line = header_lines[0] if header_lines else "HTTP/1.1 000 Unknown"
+
+    headers: dict[str, str] = {}
+    for line in header_lines[1:]:
+        if ":" not in line:
+            continue
+        key, value = line.split(":", 1)
+        headers[key.strip().lower()] = value.strip()
+    return status_line, headers, body
+
+
+def decode_chunked_body(chunked: bytes) -> bytes:
+    data = chunked
+    decoded = bytearray()
+    idx = 0
+
+    while True:
+        line_end = data.find(b"\r\n", idx)
+        if line_end == -1:
+            raise ValueError("Invalid chunked response: missing chunk size line")
+        size_line = data[idx:line_end].decode("ascii", errors="replace").strip()
+        size_token = size_line.split(";", 1)[0].strip()
+        try:
+            chunk_size = int(size_token, 16)
+        except ValueError as exc:
+            raise ValueError("Invalid chunked response: bad chunk size") from exc
+
+        idx = line_end + 2
+        if chunk_size == 0:
+            break
+
+        chunk_end = idx + chunk_size
+        if chunk_end > len(data):
+            raise ValueError("Invalid chunked response: incomplete chunk")
+        decoded.extend(data[idx:chunk_end])
+        idx = chunk_end + 2  # Skip trailing CRLF after chunk data.
+
+    return bytes(decoded)
+
+
+def fetch_http_via_socket(host: str, port: int, path: str, timeout: float) -> tuple[str, bytes]:
+    request = (
+        f"GET {path} HTTP/1.1\r\n"
+        f"Host: {host}\r\n"
+        f"User-Agent: {USER_AGENT}\r\n"
+        "Connection: close\r\n"
+        "\r\n"
+    ).encode("ascii", errors="replace")
+
+    with socket.create_connection((host, port), timeout=timeout) as sock:
+        sock.sendall(request)
+        raw_response = recv_all(sock)
+
+    status_line, headers, body = parse_http_response(raw_response)
+    transfer_encoding = headers.get("transfer-encoding", "").lower()
+    if "chunked" in transfer_encoding:
+        body = decode_chunked_body(body)
+    return status_line, body
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -78,6 +147,8 @@ def parse_http_url(url: str) -> tuple[str, int, str]:
     host = parsed.hostname
     port = parsed.port or 80
     path = parsed.path if parsed.path else "/index.html"
+    if parsed.query:
+        path = f"{path}?{parsed.query}"
     return host, port, path
 
 
@@ -96,17 +167,13 @@ def handle_url(url: str, timeout: float) -> int:
     print(f"Path: {path}")
 
     try:
-        html = fetch_html(url, timeout)
-    except HTTPError as exc:
-        print(f"HTTP error: {exc.code} {exc.reason}", file=sys.stderr)
-        return 1
-    except URLError as exc:
-        print(f"URL error: {exc.reason}", file=sys.stderr)
-        return 1
-    except OSError as exc:
+        status_line, body = fetch_http_via_socket(host, port, path, timeout)
+    except (OSError, ValueError) as exc:
         print(f"Network error: {exc}", file=sys.stderr)
         return 1
 
+    print(f"Status: {status_line}")
+    html = body.decode("utf-8", errors="replace")
     parser = TitleParser()
     parser.feed(html)
     print(f"Title: {parser.title or '(no title found)'}")
