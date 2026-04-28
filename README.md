@@ -30,6 +30,13 @@ Extracted fields:
 - content-type
 - location (redirect header)
 
+## Task 5 redirect handling
+
+- detects `301` and `302`
+- extracts `Location` header
+- automatically follows redirects
+- limit: 5 redirects (loop protection)
+
 ## Task 1 CLI interface
 
 Supported commands:

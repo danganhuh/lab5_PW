@@ -7,10 +7,11 @@ import ssl
 import sys
 from dataclasses import dataclass
 from html.parser import HTMLParser
-from urllib.parse import quote_plus, urlparse
+from urllib.parse import quote_plus, urljoin, urlparse
 
 DEFAULT_TIMEOUT = 5.0
 USER_AGENT = "go2web/0.1"
+MAX_REDIRECTS = 5
 
 
 @dataclass
@@ -192,23 +193,43 @@ def handle_url(url: str, timeout: float) -> int:
     if not url:
         print("Error: missing URL after -u", file=sys.stderr)
         return 2
-    try:
-        scheme, host, port, path = parse_web_url(url)
-    except ValueError as exc:
-        print(f"Error: {exc}", file=sys.stderr)
-        return 2
+    current_url = url
+    redirect_count = 0
+    response: ParsedHttpResponse | None = None
 
-    print(f"Scheme: {scheme}")
-    print(f"Host: {host}")
-    print(f"Port: {port}")
-    print(f"Path: {path}")
+    while True:
+        try:
+            scheme, host, port, path = parse_web_url(current_url)
+        except ValueError as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            return 2
 
-    try:
-        response = fetch_http_via_socket(
-            host=host, port=port, path=path, timeout=timeout, use_tls=(scheme == "https")
-        )
-    except (OSError, ValueError, ssl.SSLError) as exc:
-        print(f"Network error: {exc}", file=sys.stderr)
+        print(f"Scheme: {scheme}")
+        print(f"Host: {host}")
+        print(f"Port: {port}")
+        print(f"Path: {path}")
+
+        try:
+            response = fetch_http_via_socket(
+                host=host, port=port, path=path, timeout=timeout, use_tls=(scheme == "https")
+            )
+        except (OSError, ValueError, ssl.SSLError) as exc:
+            print(f"Network error: {exc}", file=sys.stderr)
+            return 1
+
+        if response.status_code in {301, 302} and response.location:
+            if redirect_count >= MAX_REDIRECTS:
+                print(f"Error: too many redirects (limit: {MAX_REDIRECTS})", file=sys.stderr)
+                return 1
+            next_url = urljoin(current_url, response.location)
+            print(f"Redirect ({response.status_code}) -> {next_url}")
+            current_url = next_url
+            redirect_count += 1
+            continue
+        break
+
+    if response is None:
+        print("Network error: empty response", file=sys.stderr)
         return 1
 
     print(f"Status: {response.status_line}")
