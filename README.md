@@ -16,6 +16,20 @@ Python CLI for the web programming tasks.
 - receives full response with looped `recv(4096)` until socket closes
 - parses headers/body and decodes chunked transfer encoding when present
 
+## Task 4 HTTP response parser
+
+Raw response is split into:
+
+- status line
+- headers
+- body
+
+Extracted fields:
+
+- status code
+- content-type
+- location (redirect header)
+
 ## Task 1 CLI interface
 
 Supported commands:
