@@ -1,107 +1,64 @@
 # go2web
 
-Python CLI for the web programming tasks.
+CLI utility for **HTTP over raw TCP sockets** (Lab 5).
 
-## Task 3 TCP Socket layer
+## CLI
 
-`-u <URL>` now uses raw sockets (no HTTP libraries):
+```bash
+go2web -u <URL>         # make HTTP/HTTPS request and print readable response
+go2web -s <search-term> # search term and print top 10 results
+go2web -h               # show help
+```
 
-- supports both `http://` and `https://`
-- opens TCP socket to `host:port`
-- wraps socket with TLS for `https://`
-- sends manual HTTP/1.1 request:
-  - `GET /path HTTP/1.1`
-  - `Host: ...`
-  - `Connection: close`
-- receives full response with looped `recv(4096)` until socket closes
-- parses headers/body and decodes chunked transfer encoding when present
+## Demo GIF
 
-## Task 4 HTTP response parser
+Add your gif file later (example: `docs/demo.gif`):
 
-Raw response is split into:
+```md
+![go2web demo](docs/demo.gif)
+```
 
-- status line
-- headers
-- body
+## Features Implemented
 
-Extracted fields:
-
-- status code
-- content-type
-- location (redirect header)
-
-## Task 5 redirect handling
-
-- detects `301` and `302`
-- extracts `Location` header
-- automatically follows redirects
-- limit: 5 redirects (loop protection)
-
-## Task 6 content processing
-
-- if `Content-Type` is `text/html`:
-  - strips HTML tags
-  - extracts visible text
-- if `Content-Type` is JSON:
-  - pretty-prints JSON
-
-## Task 9 HTTP cache
-
-- cache key: request URL
-- cache value: final response (status, headers, body, final URL)
-- storage: file-based (`.go2web_cache.json`)
-- expiration: 5 minutes
-- cache checked before network request for both `-u` and `-s`
-
-## Search engine
-
-- `-s` now uses DuckDuckGo (`https://duckduckgo.com/html/?q=...`)
-- search results are normalized to direct target links (no DuckDuckGo redirect wrapper)
-
-## Task 10 content negotiation
-
-- request header includes:
+- Raw socket HTTP/HTTPS requests (no HTTP client libraries)
+- URL parsing (`scheme`, `host`, `port`, `path`)
+- HTTP response parsing (`status line`, `headers`, `body`)
+- Redirect handling (`301`/`302`, up to 5 redirects)
+- Content negotiation header:
   - `Accept: text/html, application/json`
-- response handling:
-  - HTML (`text/html`) -> strips tags and prints readable text
-  - JSON (`application/json`) -> pretty-prints JSON
+- Content processing:
+  - HTML -> strip tags, extract visible text
+  - JSON -> pretty-print
+- Search via DuckDuckGo HTML endpoint
+- Search links normalized to direct destination URLs
+- HTTP cache (file-based, 5-minute TTL)
+- User-friendly error handling (invalid URL, DNS, timeout, refused connection, TLS issues)
 
-## Task 11 output formatting
+## Output Formatting
 
-- trims and normalizes whitespace
-- limits long lines for readability
-- keeps result links fully copyable
+- Clean readable text output
+- Whitespace normalization
+- Long-line limiting for readability
+- Search links kept copy-friendly
 
-## Task 12 error handling
+## Run
 
-- user-friendly errors for:
-  - invalid URL
-  - DNS lookup failure
-  - connection refused
-  - timeout
-  - TLS/SSL handshake problems
+From current folder:
 
-## Task 1 CLI interface
+```powershell
+python go2web -h
+python go2web -u "https://example.com"
+python go2web -s "socket programming"
+```
 
-Supported commands:
-
-- `go2web -h` show help
-- `go2web -u <URL>` call URL/HTTP handler
-- `go2web -s <search-term>` call search handler
-
-Validation:
-
-- Missing value after `-u` -> error
-- Missing value after `-s` -> error
-- Using `-u` and `-s` together -> error
-
-## Run on Windows
-
-- `python go2web -h`
-- `go2web -h` (via `go2web.cmd` in this folder)
-
-To run `go2web` from any folder, add this directory to your PATH:
+If you want plain `go2web` command in PowerShell, use `go2web.cmd` and add this folder to PATH:
 
 ```powershell
 setx PATH "$env:PATH;C:\Users\user\Desktop\University\WP\lab5"
+```
+
+Then open a new terminal and run:
+
+```powershell
+go2web -h
 ```
